@@ -13,6 +13,7 @@ import {
   Download,
   CheckCircle,
   Zap,
+  RotateCcw,
 } from "lucide-react";
 import { PotholeAPI, type ImageDetectionResponse } from "@/lib/api";
 
@@ -23,6 +24,14 @@ export function CameraSection() {
   const [isLoading, setIsLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>(
+    []
+  );
+  const [currentCameraId, setCurrentCameraId] = useState<string>("");
+  const [facingMode, setFacingMode] = useState<"user" | "environment">(
+    "environment"
+  );
+  const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
   const [capturedResults, setCapturedResults] = useState<{
     originalImageUrl: string;
     processedImageUrl: string;
@@ -44,44 +53,176 @@ export function CameraSection() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  const getAvailableCameras = async () => {
+    try {
+      await navigator.mediaDevices.getUserMedia({ video: true });
+
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(
+        (device) => device.kind === "videoinput"
+      );
+      setAvailableCameras(videoDevices);
+      setHasMultipleCameras(videoDevices.length > 1);
+
+      console.log(
+        "[v0] Available cameras:",
+        videoDevices.map((d) => ({ id: d.deviceId, label: d.label }))
+      );
+
+      if (videoDevices.length > 0 && !currentCameraId) {
+        const backCamera = videoDevices.find((device) => {
+          const label = device.label.toLowerCase();
+          return (
+            label.includes("back") ||
+            label.includes("rear") ||
+            label.includes("environment") ||
+            label.includes("0")
+          );
+        });
+
+        const selectedCamera = backCamera || videoDevices[0];
+        setCurrentCameraId(selectedCamera.deviceId);
+
+        if (backCamera) {
+          setFacingMode("environment");
+        } else {
+          setFacingMode("user");
+        }
+
+        console.log(
+          "[v0] Selected default camera:",
+          selectedCamera.label,
+          "facing:",
+          backCamera ? "environment" : "user"
+        );
+      }
+    } catch (err) {
+      console.error("Error enumerating cameras:", err);
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(
+          (device) => device.kind === "videoinput"
+        );
+        setAvailableCameras(videoDevices);
+        setHasMultipleCameras(videoDevices.length > 1);
+      } catch (fallbackErr) {
+        console.error("Fallback camera enumeration failed:", fallbackErr);
+      }
+    }
+  };
+
+  const switchCamera = async () => {
+    if (!hasMultipleCameras) return;
+
+    try {
+      const newFacingMode = facingMode === "user" ? "environment" : "user";
+      console.log(
+        "[v0] Switching camera from",
+        facingMode,
+        "to",
+        newFacingMode
+      );
+
+      let targetCamera = availableCameras.find((camera) => {
+        const label = camera.label.toLowerCase();
+        if (newFacingMode === "environment") {
+          return (
+            label.includes("back") ||
+            label.includes("rear") ||
+            label.includes("environment") ||
+            label.includes("0") ||
+            (!label.includes("front") &&
+              !label.includes("user") &&
+              !label.includes("selfie"))
+          );
+        } else {
+          return (
+            label.includes("front") ||
+            label.includes("user") ||
+            label.includes("selfie") ||
+            label.includes("1")
+          );
+        }
+      });
+
+      if (!targetCamera && availableCameras.length > 1) {
+        const currentIndex = availableCameras.findIndex(
+          (cam) => cam.deviceId === currentCameraId
+        );
+        const nextIndex = (currentIndex + 1) % availableCameras.length;
+        targetCamera = availableCameras[nextIndex];
+      }
+
+      if (targetCamera) {
+        console.log("[v0] Target camera found:", targetCamera.label);
+        setCurrentCameraId(targetCamera.deviceId);
+        setFacingMode(newFacingMode);
+
+        if (isStreaming) {
+          stopCamera();
+          setTimeout(() => {
+            startCamera();
+          }, 500);
+        }
+      } else {
+        console.log("[v0] No suitable camera found for", newFacingMode);
+      }
+    } catch (err) {
+      console.error("Error switching camera:", err);
+      setError("Gagal mengganti kamera. Silakan coba lagi.");
+    }
+  };
+
   const startCamera = async () => {
     try {
       setError(null);
       setIsLoading(true);
 
-      // Stop any existing stream first
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
       }
 
-      console.log("Meminta akses kamera...");
+      console.log(
+        "[v0] Starting camera with deviceId:",
+        currentCameraId,
+        "facingMode:",
+        facingMode
+      );
 
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
+      const constraints: MediaStreamConstraints = {
         video: {
           width: { ideal: 1280, min: 640 },
           height: { ideal: 720, min: 480 },
-          facingMode: "user",
+          ...(currentCameraId
+            ? { deviceId: { exact: currentCameraId } }
+            : { facingMode: { ideal: facingMode } }),
         },
         audio: false,
-      });
+      };
 
-      console.log("Akses kamera diberikan, mengatur video...");
+      console.log("[v0] Camera constraints:", constraints);
+
+      const mediaStream = await navigator.mediaDevices.getUserMedia(
+        constraints
+      );
+
+      console.log("[v0] Camera stream obtained successfully");
 
       if (videoRef.current) {
         videoRef.current.srcObject = mediaStream;
 
         videoRef.current.onloadedmetadata = () => {
-          console.log("Metadata video dimuat");
+          console.log("[v0] Video metadata loaded");
           if (videoRef.current) {
             videoRef.current
               .play()
               .then(() => {
-                console.log("Video diputar dengan sukses");
+                console.log("[v0] Video playing successfully");
                 setIsStreaming(true);
                 setIsLoading(false);
               })
               .catch((playError) => {
-                console.error("Error memutar video:", playError);
+                console.error("[v0] Error playing video:", playError);
                 setError("Gagal memulai pemutaran video. Silakan coba lagi.");
                 setIsLoading(false);
               });
@@ -89,7 +230,7 @@ export function CameraSection() {
         };
 
         videoRef.current.onerror = (e) => {
-          console.error("Error video:", e);
+          console.error("[v0] Video error:", e);
           setError("Error pemutaran video terjadi.");
           setIsLoading(false);
         };
@@ -97,7 +238,7 @@ export function CameraSection() {
 
       setStream(mediaStream);
     } catch (err) {
-      console.error("Error mengakses kamera:", err);
+      console.error("[v0] Error accessing camera:", err);
       setIsLoading(false);
 
       let errorMessage = "Tidak dapat mengakses kamera. ";
@@ -109,6 +250,12 @@ export function CameraSection() {
           errorMessage += "Tidak ada kamera ditemukan pada perangkat ini.";
         } else if (err.name === "NotReadableError") {
           errorMessage += "Kamera sedang digunakan oleh aplikasi lain.";
+        } else if (err.name === "OverconstrainedError") {
+          errorMessage += "Kamera tidak mendukung pengaturan yang diminta.";
+          setTimeout(() => {
+            setCurrentCameraId("");
+            startCamera();
+          }, 1000);
         } else {
           errorMessage += err.message;
         }
@@ -119,11 +266,11 @@ export function CameraSection() {
   };
 
   const stopCamera = () => {
-    console.log("Menghentikan kamera...");
+    console.log("[v0] Stopping camera...");
 
     if (stream) {
       stream.getTracks().forEach((track) => {
-        console.log("Menghentikan track:", track.kind);
+        console.log("[v0] Stopping track:", track.kind);
         track.stop();
       });
       setStream(null);
@@ -148,69 +295,59 @@ export function CameraSection() {
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0);
 
-        // Convert to blob and create URL for original image
         canvas.toBlob(
           async (blob) => {
             if (blob) {
               const originalImageUrl = URL.createObjectURL(blob);
 
-              // Start processing
               setIsProcessing(true);
               setProgress(0);
 
-              try {
-                // Simulate progress updates
-                const progressInterval = setInterval(() => {
-                  setProgress((prev) => {
-                    if (prev >= 90) {
-                      clearInterval(progressInterval);
-                      return 90;
-                    }
-                    return prev + Math.random() * 15;
-                  });
-                }, 200);
-
-                const startTime = Date.now();
-
-                const file = new File([blob], "camera-capture.jpg", {
-                  type: "image/jpeg",
+              const progressInterval = setInterval(() => {
+                setProgress((prev) => {
+                  if (prev >= 90) {
+                    clearInterval(progressInterval);
+                    return 90;
+                  }
+                  return prev + Math.random() * 15;
                 });
-                const detectionResponse: ImageDetectionResponse =
-                  await PotholeAPI.detectImage(file);
+              }, 200);
 
-                const imageBlob = new Blob(
-                  [
-                    Uint8Array.from(atob(detectionResponse.image_base64), (c) =>
-                      c.charCodeAt(0)
-                    ),
-                  ],
-                  { type: "image/jpeg" }
-                );
-                const processedImageUrl = URL.createObjectURL(imageBlob);
+              const startTime = Date.now();
 
-                clearInterval(progressInterval);
+              const file = new File([blob], "camera-capture.jpg", {
+                type: "image/jpeg",
+              });
+              const detectionResponse: ImageDetectionResponse =
+                await PotholeAPI.detectImage(file);
 
-                const processingTime = (Date.now() - startTime) / 1000;
+              const imageBlob = new Blob(
+                [
+                  Uint8Array.from(atob(detectionResponse.image_base64), (c) =>
+                    c.charCodeAt(0)
+                  ),
+                ],
+                { type: "image/jpeg" }
+              );
+              const processedImageUrl = URL.createObjectURL(imageBlob);
 
-                setProgress(100);
-                setCapturedResults({
-                  originalImageUrl,
-                  processedImageUrl,
-                  //@ts-ignore
-                  detections: detectionResponse.detections,
-                  processingTime: Math.round(processingTime * 10) / 10,
-                  timestamp: new Date().toLocaleString("id-ID"),
-                  totalPotholes: detectionResponse.total_potholes,
-                  processingInfo: detectionResponse.processing_info,
-                });
+              clearInterval(progressInterval);
 
-                setIsProcessing(false);
-              } catch (err) {
-                console.error("Detection error:", err);
-                setError("Terjadi kesalahan saat memproses gambar");
-                setIsProcessing(false);
-                setProgress(0);
-              }
+              const processingTime = (Date.now() - startTime) / 1000;
+
+              setProgress(100);
+              setCapturedResults({
+                originalImageUrl,
+                processedImageUrl,
+                //@ts-ignores
+                detections: detectionResponse.detections,
+                processingTime: Math.round(processingTime * 10) / 10,
+                timestamp: new Date().toLocaleString("id-ID"),
+                totalPotholes: detectionResponse.total_potholes,
+                processingInfo: detectionResponse.processing_info,
+              });
+
+              setIsProcessing(false);
             }
           },
           "image/jpeg",
@@ -247,17 +384,21 @@ export function CameraSection() {
   };
 
   useEffect(() => {
+    const initializeCamera = async () => {
+      await getAvailableCameras();
+    };
+
+    initializeCamera();
+
     return () => {
-      // Cleanup on unmount
       if (stream) {
         stream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [stream]);
+  }, []);
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8">
-      {/* Camera Feed */}
       <div className="p-6 sm:p-8 rounded-2xl sm:rounded-3xl bg-slate-800/30 border border-slate-700/50 backdrop-blur-xl">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-6 sm:mb-8 space-y-3 sm:space-y-0">
           <div className="flex items-center space-x-3">
@@ -274,20 +415,33 @@ export function CameraSection() {
             </div>
           </div>
 
-          {isStreaming && (
-            <Button
-              onClick={refreshCamera}
-              size="sm"
-              variant="outline"
-              className="border-slate-600 text-slate-300 hover:text-white hover:border-slate-500 bg-transparent text-sm sm:text-base"
-            >
-              <RefreshCw className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
-              Segarkan
-            </Button>
-          )}
+          <div className="flex items-center space-x-2">
+            {isStreaming && hasMultipleCameras && (
+              <Button
+                onClick={switchCamera}
+                size="sm"
+                variant="outline"
+                className="border-slate-600 text-slate-300 hover:text-white hover:border-slate-500 bg-transparent text-sm sm:text-base"
+              >
+                <RotateCcw className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
+                {facingMode === "user" ? "Ke Belakang" : "Ke Depan"}
+              </Button>
+            )}
+
+            {isStreaming && (
+              <Button
+                onClick={refreshCamera}
+                size="sm"
+                variant="outline"
+                className="border-slate-600 text-slate-300 hover:text-white hover:border-slate-500 bg-transparent text-sm sm:text-base"
+              >
+                <RefreshCw className="w-3 h-3 sm:w-4 sm:h-4 mr-2" />
+                Segarkan
+              </Button>
+            )}
+          </div>
         </div>
 
-        {/* Error Display */}
         {error && (
           <div className="mb-4 sm:mb-6 p-3 sm:p-4 rounded-xl sm:rounded-2xl bg-red-500/10 border border-red-500/20">
             <div className="flex items-center space-x-3">
@@ -302,7 +456,6 @@ export function CameraSection() {
           </div>
         )}
 
-        {/* Loading State */}
         {isLoading && (
           <div className="mb-4 sm:mb-6 p-3 sm:p-4 rounded-xl sm:rounded-2xl bg-blue-500/10 border border-blue-500/20">
             <div className="flex items-center space-x-3">
@@ -311,7 +464,7 @@ export function CameraSection() {
                 <p className="text-blue-400 font-medium text-sm sm:text-base">
                   Memulai Kamera...
                 </p>
-                <p className="text-blue-300 text-xs sm:text-sm">
+                <p className="text-blue-300 text-sm">
                   Harap tunggu sementara kami mengakses kamera Anda
                 </p>
               </div>
@@ -319,7 +472,6 @@ export function CameraSection() {
           </div>
         )}
 
-        {/* Camera View */}
         <div className="relative rounded-xl sm:rounded-2xl overflow-hidden bg-slate-700/50 mb-4 sm:mb-6">
           {!isStreaming && !isLoading ? (
             <div className="aspect-video flex items-center justify-center bg-slate-800/50">
@@ -349,7 +501,6 @@ export function CameraSection() {
                 }}
               />
 
-              {/* Loading overlay */}
               {isLoading && (
                 <div className="absolute inset-0 flex items-center justify-center bg-slate-800/80">
                   <div className="text-center space-y-3 sm:space-y-4">
@@ -364,7 +515,6 @@ export function CameraSection() {
           )}
         </div>
 
-        {/* Processing Progress */}
         {isProcessing && (
           <div className="mb-4 sm:mb-6 space-y-3">
             <div className="flex items-center justify-between">
@@ -385,7 +535,6 @@ export function CameraSection() {
           </div>
         )}
 
-        {/* Camera Controls */}
         <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
           {!isStreaming ? (
             <Button
@@ -417,7 +566,6 @@ export function CameraSection() {
           )}
         </div>
 
-        {/* Debug Info */}
         {isStreaming && (
           <div className="mt-3 sm:mt-4 p-2 sm:p-3 rounded-lg bg-slate-700/30 text-xs text-slate-400">
             <p>Status Kamera: Aktif</p>
@@ -425,15 +573,16 @@ export function CameraSection() {
               Dimensi Video: {videoRef.current?.videoWidth || 0} x{" "}
               {videoRef.current?.videoHeight || 0}
             </p>
+            <p>Mode Kamera: {facingMode === "user" ? "Depan" : "Belakang"}</p>
+            <p>Kamera Tersedia: {availableCameras.length}</p>
+            {hasMultipleCameras && <p>✓ Dapat beralih kamera</p>}
             <p>Siap untuk menangkap gambar</p>
           </div>
         )}
 
-        {/* Hidden canvas for frame capture */}
         <canvas ref={canvasRef} className="hidden" />
       </div>
 
-      {/* Detection Results */}
       <div className="space-y-4 sm:space-y-6">
         {!capturedResults ? (
           <div className="p-6 sm:p-8 rounded-2xl sm:rounded-3xl bg-slate-800/30 border border-slate-700/50 backdrop-blur-xl">
@@ -453,7 +602,6 @@ export function CameraSection() {
           </div>
         ) : (
           <>
-            {/* Main Result Image */}
             <div className="p-4 sm:p-6 rounded-xl sm:rounded-2xl bg-slate-800/30 border border-slate-700/50 backdrop-blur-xl">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between mb-4 sm:mb-6 space-y-3 sm:space-y-0">
                 <div className="flex items-center space-x-3">
@@ -491,9 +639,7 @@ export function CameraSection() {
               </div>
             </div>
 
-            {/* Detection Statistics */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-              {/* Card Deteksi Lubang Jalan (versi baru) */}
               <div className="p-4 sm:p-6 rounded-xl sm:rounded-2xl bg-slate-800/30 border border-slate-700/50 backdrop-blur-sm flex flex-col">
                 <div className="flex items-center space-x-3 mb-4">
                   <div className="p-2 rounded-lg bg-cyan-500/10">
@@ -544,7 +690,6 @@ export function CameraSection() {
                 </div>
               </div>
 
-              {/* Processing Time */}
               <div className="p-4 sm:p-6 rounded-xl sm:rounded-2xl bg-slate-800/30 border border-slate-700/50 backdrop-blur-sm">
                 <div className="flex items-center space-x-3 mb-3 sm:mb-4">
                   <div className="p-2 rounded-lg bg-orange-500/10">
